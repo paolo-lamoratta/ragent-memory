@@ -1,5 +1,7 @@
 .pyenv/
 vector_db/
 models/
-__pycache__
+__pycache__/
+*.pyc
+.DS_Store
 resources/

@@ -18,7 +18,7 @@ class DynamicAgentRAG():
         self.embedder = EmbedManager(model_name=model_name, pretrained=pretrained)
         self.chunker = Chunker(chunk_size=950, chunk_overlap=280)
 
-    def add_to_memory(self, text: str):
+    def add_to_memory(self, text: str) -> str:
         documents, ids, metadatas = self.chunker.chunk_text(text)
         embeddings = self.embedder.embed_text(documents)
         source_id = ids[0].rsplit("_c", 1)[0]
@@ -123,9 +123,15 @@ class DynamicAgentRAG():
 
         # --- Process in sub-batches to keep tensors small ---
         n_total = len(image_paths)
+        n_batches = (n_total + batch_size - 1) // batch_size
         for start in range(0, n_total, batch_size):
             end = min(start + batch_size, n_total)
+            batch_num = start // batch_size + 1
             sub_batch = image_paths[start:end]
+            print(
+                f"[DynamicAgentRAG] Sub-batch {batch_num}/{n_batches} "
+                f"({len(sub_batch)} images, index {start}–{end - 1})"
+            )
             sub_embeddings = self.embedder.embed_image(sub_batch)
             all_embeddings.extend(sub_embeddings)
 
@@ -165,7 +171,7 @@ class DynamicAgentRAG():
 
         return source_ids
 
-    def retrieve_context(self, query: str, top_k: int = 3, threshold: float = 0.0):
+    def retrieve_context(self, query: str, top_k: int = 3, threshold: float = 0.0) -> list[dict[str, Any]]:
         query_embedding = self.embedder.embed_text(query)[0]
         results = self.db.collection.query(
             query_embeddings=[query_embedding],
@@ -295,19 +301,13 @@ class DynamicAgentRAG():
 
         return self._get_paragraph_entries(neighbour_id)
 
-    #def update_memory(self, new_text, source_id=None, metadata=None):
-    #    if source_id in self.memory_metadata:
-    #        old_chunks = self.memory_metadata[source_id]["chunks"]
-    #        self.db.collection.delete(ids=old_chunks)
-    #    self.add_to_memory(new_text, metadata, source_id)
-
-    def forget_memory(self, source_id):
+    def forget_memory(self, source_id: str) -> None:
         if source_id in self.memory_metadata:
             chunks = self.memory_metadata[source_id]["chunks"]
             self.db.collection.delete(ids=chunks)
             del self.memory_metadata[source_id]
 
-    def query_memory(self, query):
+    def query_memory(self, query: str) -> dict[str, Any]:
         context = self.retrieve_context(query)
         return {
             "query": query,
@@ -333,7 +333,7 @@ class DynamicAgentRAG():
 
         return "\n".join(lines)
 
-    def get_memory_stats(self):
+    def get_memory_stats(self) -> dict[str, int]:
         return {
             "total_memories": len(self.memory_metadata),
             "total_chunks": self.db.collection.count(),

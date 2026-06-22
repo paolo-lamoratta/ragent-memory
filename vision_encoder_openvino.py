@@ -149,6 +149,75 @@ class OpenVINOVisionEncoder:
 
 
 # ------------------------------------------------------------------
+# GPU monitoring (no external tools needed)
+# ------------------------------------------------------------------
+
+def gpu_status(ov_encoder: OpenVINOVisionEncoder | None = None) -> dict:
+    """
+    Report OpenVINO GPU state — call this any time to check if the GPU
+    is live and how much memory it's using.
+
+    Args:
+        ov_encoder:  Optional ``OpenVINOVisionEncoder``.  If omitted, a fresh
+                     OpenVINO Core is used for device-level stats only.
+
+    Returns:
+        Dict with keys like ``device``, ``gpu_memory_used_mb``,
+        ``model_loaded``, ``available_devices``.
+    """
+    import openvino as ov
+
+    core = ov.Core()
+    info: dict = {
+        "available_devices": core.available_devices,
+        "gpu_available": "GPU" in core.available_devices,
+    }
+
+    if "GPU" in core.available_devices:
+        info["gpu_name"] = core.get_property("GPU", "FULL_DEVICE_NAME")
+        try:
+            mem = core.get_property("GPU", "GPU_MEMORY_STATISTICS")
+            # mem is a dict like {'cl_mem': 0, 'usm_device': 1234567, ...}
+            total_bytes = sum(v for v in mem.values() if isinstance(v, (int, float)))
+            info["gpu_memory_used_mb"] = round(total_bytes / (1024 * 1024), 1)
+            info["gpu_memory_raw"] = mem
+        except Exception:
+            info["gpu_memory_used_mb"] = "unavailable"
+
+    if ov_encoder is not None:
+        info["model_loaded"] = True
+        info["model_device"] = ov_encoder._device
+    else:
+        info["model_loaded"] = False
+
+    return info
+
+
+def print_gpu_status(ov_encoder: OpenVINOVisionEncoder | None = None) -> None:
+    """Pretty-print the result of :func:`gpu_status` to stdout."""
+    info = gpu_status(ov_encoder)
+
+    print("─" * 50)
+    print("GPU Status")
+    print("─" * 50)
+    print(f"  OpenVINO devices: {info['available_devices']}")
+    print(f"  GPU available:    {info['gpu_available']}")
+    if info.get("gpu_name"):
+        print(f"  GPU name:         {info['gpu_name']}")
+    print(f"  Model loaded:     {info['model_loaded']}")
+    if info.get("model_device"):
+        print(f"  Model device:     {info['model_device']}")
+    mem = info.get("gpu_memory_used_mb")
+    if isinstance(mem, (int, float)) and mem > 0:
+        print(f"  GPU memory used:  {mem} MB  ← GPU is actively working")
+    elif mem == 0:
+        print(f"  GPU memory used:  0 MB (idle — run an embed call to see activity)")
+    else:
+        print(f"  GPU memory used:  {mem}")
+    print("─" * 50)
+
+
+# ------------------------------------------------------------------
 # Factory — with graceful fallback
 # ------------------------------------------------------------------
 

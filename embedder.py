@@ -77,14 +77,17 @@ class EmbedManager():
         try:
             from vision_encoder_openvino import create_openvino_encoder
             self._ov_encoder = create_openvino_encoder(self, onnx_cache_path)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[EmbedManager] OpenVINO init failed: {exc}")
+            print("[EmbedManager] Falling back to PyTorch CPU for images")
 
         if self._ov_encoder:
+            from vision_encoder_openvino import print_gpu_status
             print(
                 "[EmbedManager] Vision backend: OpenVINO (GPU, FP16) for images | "
                 "PyTorch (CPU, FP32) for text"
             )
+            print_gpu_status(self._ov_encoder)
         else:
             print(
                 "[EmbedManager] Vision backend: PyTorch (CPU, FP32) for both "
@@ -191,6 +194,11 @@ class EmbedManager():
         )
 
         return image_features.tolist()
+
+    def gpu_status(self) -> None:
+        """Print current GPU state — call any time to verify GPU is live."""
+        from vision_encoder_openvino import print_gpu_status
+        print_gpu_status(self._ov_encoder)
 
 
 # ------------------------------------------------------------------

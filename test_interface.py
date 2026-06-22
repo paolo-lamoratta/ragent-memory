@@ -72,7 +72,7 @@ import os
 
 # Common image extensions to auto-discover
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
-MAX_AUTO_IMAGES = 2000  # safety cap — never ingest the whole directory blindly
+MAX_AUTO_IMAGES = 360
 
 resources_dir = "resources"
 if os.path.isdir(resources_dir):
@@ -82,12 +82,15 @@ if os.path.isdir(resources_dir):
         if os.path.splitext(fname)[1].lower() in IMAGE_EXTS
     ]
     if image_paths:
-        if len(image_paths) > MAX_AUTO_IMAGES:
+        total_found = len(image_paths)
+        if total_found > MAX_AUTO_IMAGES:
             print(
-                f"  (found {len(image_paths)} images — ingesting only the first "
-                f"{MAX_AUTO_IMAGES}; pass an explicit list to ingest more)"
+                f"  Found {total_found} images — ingesting first {MAX_AUTO_IMAGES}.\n"
+                f"  Edit MAX_AUTO_IMAGES in this script to ingest more."
             )
             image_paths = image_paths[:MAX_AUTO_IMAGES]
+        else:
+            print(f"  Ingesting {len(image_paths)} images …")
         rag.add_batch_images_to_memory(image_paths)
     else:
         print("  (no image files found in resources/ — add .png or .jpg files)")
