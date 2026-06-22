@@ -1,1 +1,4 @@
 .pyenv/
+vector_db/
+__pycache__
+resources/
