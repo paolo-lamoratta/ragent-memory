@@ -1,4 +1,5 @@
 .pyenv/
 vector_db/
+models/
 __pycache__
 resources/

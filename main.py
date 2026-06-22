@@ -9,17 +9,18 @@ class DynamicAgentRAG():
             self,
             storage_directory: str = "./vector_db/",
             memory_label: str = "myrag",
-            embedding_model: str = "all-MiniLM-L6-v2",
+            model_name: str = "ViT-SO400M-14-SigLIP-384",
+            pretrained: str = "webli",
     ) -> None:
         self.memory_metadata: dict[str, dict[str, Any]] = {}
 
         self.db = DB(storage_directory=storage_directory, db_name=memory_label)
-        self.embedder = EmbedManager(embedding_model=embedding_model)
+        self.embedder = EmbedManager(model_name=model_name, pretrained=pretrained)
         self.chunker = Chunker(chunk_size=950, chunk_overlap=280)
 
     def add_to_memory(self, text: str):
         documents, ids, metadatas = self.chunker.chunk_text(text)
-        embeddings = self.embedder.embed(documents)
+        embeddings = self.embedder.embed_text(documents)
         source_id = ids[0].rsplit("_c", 1)[0]
 
         self.db.collection.upsert(
@@ -33,12 +34,139 @@ class DynamicAgentRAG():
             "chunk_count": len(documents),
             "chunks": ids,
             "timestamp": datetime.now().isoformat(),
+            "type": "text",
         }
 
+        print(
+            f"[DynamicAgentRAG] add_to_memory: {len(documents)} chunks "
+            f"ingested (source_id={source_id})"
+        )
+
         return source_id
-    
+
+    def add_image_to_memory(self, image_path: str) -> str:
+        """
+        Ingest a single image file into the vector database.
+
+        Images are embedded via the CLIP vision encoder and stored alongside
+        a ``type: "image"`` metadata tag so the retrieval loop can bypass
+        paragraph-expansion logic that only applies to text chunks.
+
+        Args:
+            image_path:  Absolute or relative path to an image file on disk.
+
+        Returns:
+            The generated ``source_id`` (8-char hex digest of the path).
+        """
+        import hashlib
+
+        # 1. Generate the image embedding
+        embedding = self.embedder.embed_image(image_path)[0]
+
+        # 2. Create a unique source ID keyed on the file path
+        source_id = hashlib.md5(image_path.encode()).hexdigest()[:8]
+        image_id = f"img_{source_id}"
+
+        # 3. Upsert into ChromaDB — store the path as the document
+        self.db.collection.upsert(
+            ids=[image_id],
+            embeddings=[embedding],
+            documents=[image_path],
+            metadatas=[{
+                "type": "image",
+                "source_id": source_id,
+                "timestamp": datetime.now().isoformat(),
+            }],
+        )
+
+        # 4. Track in the local metadata registry
+        self.memory_metadata[source_id] = {
+            "chunk_count": 1,
+            "chunks": [image_id],
+            "timestamp": datetime.now().isoformat(),
+            "type": "image",
+        }
+
+        print(
+            f"[DynamicAgentRAG] add_image_to_memory: 1 image ingested "
+            f"(source_id={source_id}, path={image_path})"
+        )
+
+        return source_id
+
+    def add_batch_images_to_memory(
+        self, image_paths: list[str], batch_size: int = 32,
+    ) -> list[str]:
+        """
+        Ingest multiple images, processing them in sub-batches to keep
+        peak GPU/CPU memory bounded while still exploiting vectorised
+        forward passes through the Vision Transformer.
+
+        Args:
+            image_paths:  List of paths to image files on disk.
+            batch_size:   Max images to encode in a single forward pass
+                          (default 32).  Lower this if you run out of RAM.
+
+        Returns:
+            List of generated ``source_id`` strings (one per image).
+        """
+        import hashlib
+
+        if not image_paths:
+            return []
+
+        timestamp = datetime.now().isoformat()
+        ids: list[str] = []
+        metadatas: list[dict[str, str]] = []
+        source_ids: list[str] = []
+        all_embeddings: list[list[float]] = []
+
+        # --- Process in sub-batches to keep tensors small ---
+        n_total = len(image_paths)
+        for start in range(0, n_total, batch_size):
+            end = min(start + batch_size, n_total)
+            sub_batch = image_paths[start:end]
+            sub_embeddings = self.embedder.embed_image(sub_batch)
+            all_embeddings.extend(sub_embeddings)
+
+        # --- Build upsert payloads ---
+        for path in image_paths:
+            source_id = hashlib.md5(path.encode()).hexdigest()[:8]
+            image_id = f"img_{source_id}"
+            source_ids.append(source_id)
+
+            ids.append(image_id)
+            metadatas.append({
+                "type": "image",
+                "source_id": source_id,
+                "timestamp": timestamp,
+            })
+
+            self.memory_metadata[source_id] = {
+                "chunk_count": 1,
+                "chunks": [image_id],
+                "timestamp": timestamp,
+                "type": "image",
+            }
+
+        # --- Single ChromaDB upsert with all embeddings ---
+        self.db.collection.upsert(
+            ids=ids,
+            embeddings=all_embeddings,
+            documents=image_paths,
+            metadatas=metadatas,  # type: ignore[arg-type]
+        )
+
+        print(
+            f"[DynamicAgentRAG] add_batch_images_to_memory: "
+            f"{n_total} images ingested "
+            f"(batch_size={batch_size}, source_ids={source_ids})"
+        )
+
+        return source_ids
+
     def retrieve_context(self, query: str, top_k: int = 3, threshold: float = 0.0):
-        query_embedding = self.embedder.embed(query)
+        query_embedding = self.embedder.embed_text(query)[0]
         results = self.db.collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
@@ -65,6 +193,20 @@ class DynamicAgentRAG():
 
             document = results["documents"][0][i]
             metadata = results["metadatas"][0][i]
+
+            # --- Image bypass: images have no paragraphs, short-circuit ---
+            if metadata.get("type") == "image":
+                context.append({
+                    "text": f"[IMAGE FILE] {document}",
+                    "metadata": metadata,
+                    "similarity": similarity,
+                    "source_id": metadata.get("source_id"),
+                    "chunk_start": 0,
+                    "chunk_end": 0,
+                })
+                continue
+            # ----------------------------------------------------------------
+
             paragraph_id: str = metadata["paragraph_id"]  # type: ignore[assignment]
             source_id: str | None = metadata.get("source_id")  # type: ignore[assignment]
 
