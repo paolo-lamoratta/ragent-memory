@@ -10,6 +10,3 @@ huggingface_hub>=1.20
 openvino>=2025.0
 onnx>=1.17
 onnxscript>=0.7
-
-# Intel Arc iGPU acceleration for PyTorch (optional)
-intel-extension-for-pytorch>=2.8

@@ -25,7 +25,7 @@ class DynamicAgentRAG():
 
         self.db.collection.upsert(
             ids=ids,
-            embeddings=embeddings,
+            embeddings=embeddings,  # type: ignore[arg-type]
             documents=documents,
             metadatas=metadatas,  # type: ignore[arg-type]
         )
@@ -148,7 +148,7 @@ class DynamicAgentRAG():
         # --- Single ChromaDB upsert with all embeddings ---
         self.db.collection.upsert(
             ids=ids,
-            embeddings=all_embeddings,
+            embeddings=all_embeddings,  # type: ignore[arg-type]
             documents=image_paths,
             metadatas=metadatas,  # type: ignore[arg-type]
         )

@@ -13,7 +13,6 @@ cosine-similarity comparisons in the vector database.
 
 import io
 import os
-import time
 import logging
 import contextlib
 import concurrent.futures
@@ -27,16 +26,6 @@ logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
 import torch
 
-# Attempt to enable Intel Arc iGPU acceleration via IPEX.
-# Gracefully fall back to CPU when IPEX is absent or its version
-# doesn't match the installed PyTorch.
-with contextlib.redirect_stderr(io.StringIO()):
-    try:
-        import intel_extension_for_pytorch as ipex  # noqa: F401
-        _IPEX_AVAILABLE = True
-    except Exception:
-        _IPEX_AVAILABLE = False
-
 with contextlib.redirect_stderr(io.StringIO()):
     import open_clip
     from PIL import Image
@@ -44,19 +33,18 @@ with contextlib.redirect_stderr(io.StringIO()):
 Image.MAX_IMAGE_PIXELS = None  # disable decompression-bomb check
 
 
-class EmbedManager():
-    """
-    Multimodal embedding manager powered by OpenCLIP.
+class EmbedManager:
+    """Multimodal embedding manager powered by OpenCLIP.
 
-    Auto-detects Intel Arc iGPU (xpu backend) when available and falls back
-    to CPU otherwise.  Exposes separate ``embed_text`` and ``embed_image``
-    entry points so callers can route text queries and image ingestion
-    through the correct encoder.
+    Exposes separate ``embed_text`` and ``embed_image`` entry points so
+    callers can route text queries and image ingestion through the correct
+    encoder.  The vision encoder uses OpenVINO GPU (FP16) when available,
+    falling back to PyTorch CPU (FP32).
     """
 
     def __init__(
         self,
-        model_name: str = "ViT-B-16-SigLIP",#"ViT-SO400M-14-SigLIP-384",
+        model_name: str = "ViT-B-16-SigLIP",
         pretrained: str = "webli",
         onnx_cache_path: str = "models/vitb_image_encoder.onnx",
     ) -> None:
@@ -69,19 +57,16 @@ class EmbedManager():
             pretrained:      Pretrained weights tag (e.g. ``"webli"``).
             onnx_cache_path: Where to cache the exported ONNX model.
         """
-        # --- Device selection: prefer Intel Arc iGPU, fallback to CPU ---
-        self.device = (
-            "xpu"
-            if hasattr(torch, "xpu") and torch.xpu.is_available()
-            else "cpu"
-        )
         # --- Model, image-preprocessing pipeline, and tokenizer ---
+        self.device = "cpu"
         with contextlib.redirect_stderr(io.StringIO()):
-            self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+            model_and_transforms = open_clip.create_model_and_transforms(
                 model_name,
                 pretrained=pretrained,
                 device=self.device,
             )
+            self.model = model_and_transforms[0]
+            self.preprocess = model_and_transforms[2]  # eval transform
             self.tokenizer = open_clip.get_tokenizer(model_name)
 
         # --- OpenVINO vision encoder (FP16 GPU for batch image indexing) ---
@@ -116,13 +101,11 @@ class EmbedManager():
         if isinstance(text, str):
             text = [text]
 
-        t0 = time.perf_counter()
-
         # Tokenize and move to the active device
         text_tokens = self.tokenizer(text).to(self.device)
 
         with torch.inference_mode():
-            text_features = self.model.encode_text(text_tokens)
+            text_features = self.model.encode_text(text_tokens) # type: ignore[arg-type]
             # L2 normalisation — required for cosine-similarity searches
             text_features /= text_features.norm(dim=-1, keepdim=True)
 
@@ -145,20 +128,18 @@ class EmbedManager():
         if isinstance(image_paths, str):
             image_paths = [image_paths]
 
-        t0 = time.perf_counter()
-
         # Decode and preprocess images in parallel via a thread pool.
         # PIL/JPEG decoding is I/O-bound, so 16 workers keep the pipeline
         # saturated — while one batch goes through the encoder, the next
         # batch of raw images is already being decoded.
         def _load_and_preprocess(path: str):
-            return self.preprocess(Image.open(path).convert("RGB"))
+            return self.preprocess(Image.open(path).convert("RGB"))  # type: ignore[operator]
 
         n_workers = min(len(image_paths), 24)
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
             images = list(pool.map(_load_and_preprocess, image_paths))
 
-        image_input = torch.stack(images)
+        image_input = torch.stack(images)   # type: ignore[arg-type]
 
         # --- OpenVINO path (GPU, FP16) ---
         if self._ov_encoder is not None:
@@ -169,16 +150,10 @@ class EmbedManager():
         # --- PyTorch fallback (CPU, FP32) ---
         image_input = image_input.to(self.device)
         with torch.inference_mode():
-            image_features = self.model.encode_image(image_input)
+            image_features = self.model.encode_image(image_input)  # type: ignore[operator]
             image_features /= image_features.norm(dim=-1, keepdim=True)
 
         return image_features.tolist()
-
-    def gpu_status(self) -> None:
-        """Print current GPU state — call any time to verify GPU is live."""
-        from vision_encoder_openvino import print_gpu_status
-        print_gpu_status(self._ov_encoder)
-
 
 # ------------------------------------------------------------------
 # Quick smoke test (run with:  python embedder.py)
