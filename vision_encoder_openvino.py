@@ -1,9 +1,9 @@
 """
-OpenVINO-accelerated vision encoder for CLIP image embeddings.
+OpenVINO-accelerated vision encoder for batch image embeddings.
 
 Provides:
-  - ONNX export of the OpenCLIP vision encoder (one-time, cached to disk)
-  - OpenVINO inference with FP16 precision on Intel GPU
+  - ONNX export of the vision encoder (one-time, cached to disk)
+  - OpenVINO inference with FP16 precision on GPU
   - Graceful fallback when OpenVINO or GPU is unavailable
 
 Usage
@@ -33,11 +33,11 @@ import torch
 
 def export_vision_encoder_to_onnx(
     embed_manager: Any,
-    cache_path: str = "models/vision_encoder.onnx",
-    image_size: int = 384,
+    cache_path: str = "models/vitb_image_encoder.onnx",
+    image_size: int = 224,
 ) -> str:
     """
-    Export the OpenCLIP vision encoder to ONNX for use with OpenVINO.
+    Export the vision encoder to ONNX for use with OpenVINO.
 
     Traces ``model.encode_image`` with a dummy input tensor of shape
     ``(1, 3, image_size, image_size)`` and writes the ONNX graph to
@@ -45,9 +45,9 @@ def export_vision_encoder_to_onnx(
 
     Args:
         embed_manager:  An ``EmbedManager`` instance whose ``.model``
-                        holds the loaded OpenCLIP model.
+                        holds the loaded model.
         cache_path:     Destination path for the ``.onnx`` file.
-        image_size:     Expected input size (384 for ViT-SO400M-14-SigLIP).
+        image_size:     Expected input size in pixels (model-dependent).
 
     Returns:
         The absolute path to the ONNX file.
@@ -55,19 +55,15 @@ def export_vision_encoder_to_onnx(
     os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
 
     if os.path.exists(cache_path):
-        print(f"[ONNX export] {cache_path} already exists — skipping")
         return os.path.abspath(cache_path)
 
     model = embed_manager.model
     device = embed_manager.device
 
-    # Dummy preprocessed image batch (1, 3, 384, 384)
+    # Dummy preprocessed image batch
     dummy_input = torch.randn(1, 3, image_size, image_size, device=device)
 
-    print(f"[ONNX export] Tracing vision encoder (device={device}) …")
-    t0 = time.perf_counter()
-
-    # Trace encode_image — includes the ViT forward pass + L2 normalisation
+    # Trace encode_image — includes the forward pass + L2 normalisation
     with torch.inference_mode():
         torch.onnx.export(
             model,
@@ -83,8 +79,6 @@ def export_vision_encoder_to_onnx(
             verbose=False,
         )
 
-    elapsed = time.perf_counter() - t0
-    print(f"[ONNX export] Done in {elapsed:.1f}s → {os.path.abspath(cache_path)}")
     return os.path.abspath(cache_path)
 
 
@@ -94,7 +88,7 @@ def export_vision_encoder_to_onnx(
 
 class OpenVINOVisionEncoder:
     """
-    Runs the CLIP vision encoder through OpenVINO with FP16 precision.
+    Runs the vision encoder through OpenVINO with FP16 precision.
 
     Parameters
     ----------
@@ -108,8 +102,6 @@ class OpenVINOVisionEncoder:
         import openvino as ov
 
         self._device = device
-        print(f"[OpenVINO] Loading model for device={device} (FP16) …")
-        t0 = time.perf_counter()
 
         core = ov.Core()
         # Read the ONNX model directly — no separate IR conversion needed
@@ -122,18 +114,12 @@ class OpenVINOVisionEncoder:
         })
         self._infer_request = self._compiled.create_infer_request()
 
-        elapsed = time.perf_counter() - t0
-        print(
-            f"[OpenVINO] Model compiled in {elapsed:.1f}s  "
-            f"(device={device}, precision=FP16)"
-        )
-
     def encode(self, image_tensor: torch.Tensor) -> np.ndarray:
         """
         Encode a batch of preprocessed images.
 
         Args:
-            image_tensor:  ``(B, 3, 384, 384)`` tensor on any device.
+            image_tensor:  ``(B, C, H, W)`` tensor on any device.
                            Will be moved to CPU numpy if needed.
 
         Returns:
@@ -245,40 +231,29 @@ def create_openvino_encoder(
     # 1. Ensure ONNX model exists
     try:
         export_vision_encoder_to_onnx(embed_manager, onnx_cache_path)
-    except Exception as exc:
-        print(f"[OpenVINO] ONNX export failed: {exc}")
+    except Exception:
         return None
 
     # 2. Try loading with OpenVINO
     try:
         import openvino as ov
         core = ov.Core()
-        available = core.available_devices
-        print(f"[OpenVINO] Available devices: {available}")
     except ImportError:
-        print("[OpenVINO] openvino not installed — falling back to PyTorch CPU")
         return None
-    except Exception as exc:
-        print(f"[OpenVINO] Initialisation error: {exc}")
+    except Exception:
         return None
 
     # 3. Pick device — prefer GPU, fall back to CPU
     device = preferred_device
     if device not in core.available_devices:
-        print(
-            f"[OpenVINO] '{device}' not in available devices {core.available_devices} "
-            f"— trying CPU"
-        )
         if "CPU" in core.available_devices:
             device = "CPU"
         else:
-            print("[OpenVINO] No usable device found — falling back to PyTorch CPU")
             return None
 
     # 4. Compile
     try:
         encoder = OpenVINOVisionEncoder(onnx_cache_path, device=device)
         return encoder
-    except Exception as exc:
-        print(f"[OpenVINO] Failed to compile model: {exc}")
+    except Exception:
         return None

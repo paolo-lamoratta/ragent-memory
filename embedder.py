@@ -1,20 +1,30 @@
 """
-EmbedManager: multimodal embedding via OpenCLIP (ViT-SO400M-14-SigLIP-384).
+EmbedManager: multimodal embedding via OpenCLIP.
 
 Provides two separate embedding pipelines:
-  - embed_text()   → for user search queries (CLIP text encoder, PyTorch CPU)
-  - embed_image()  → for ingesting image files (CLIP vision encoder)
+  - embed_text()   → for user search queries (text encoder)
+  - embed_image()  → for ingesting image files (vision encoder)
                       Uses OpenVINO GPU (FP16) when available, falls back to
                       PyTorch CPU otherwise.
 
-Both pipelines apply L2 normalization, which is mandatory for CLIP vectors
-to ensure accurate cosine-similarity comparisons in ChromaDB.
+Both pipelines apply L2 normalisation, which is mandatory for
+cosine-similarity comparisons in the vector database.
 """
 
 import io
+import os
 import time
+import logging
 import contextlib
 import concurrent.futures
+import warnings
+
+# Suppress noisy library output before any model imports
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+warnings.filterwarnings("ignore", message=".*DecompressionBomb.*")
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+
 import torch
 
 # Attempt to enable Intel Arc iGPU acceleration via IPEX.
@@ -27,8 +37,11 @@ with contextlib.redirect_stderr(io.StringIO()):
     except Exception:
         _IPEX_AVAILABLE = False
 
-import open_clip
-from PIL import Image
+with contextlib.redirect_stderr(io.StringIO()):
+    import open_clip
+    from PIL import Image
+
+Image.MAX_IMAGE_PIXELS = None  # disable decompression-bomb check
 
 
 class EmbedManager():
@@ -38,14 +51,14 @@ class EmbedManager():
     Auto-detects Intel Arc iGPU (xpu backend) when available and falls back
     to CPU otherwise.  Exposes separate ``embed_text`` and ``embed_image``
     entry points so callers can route text queries and image ingestion
-    through the correct CLIP encoder.
+    through the correct encoder.
     """
 
     def __init__(
         self,
-        model_name: str = "ViT-SO400M-14-SigLIP-384",
+        model_name: str = "ViT-B-16-SigLIP",#"ViT-SO400M-14-SigLIP-384",
         pretrained: str = "webli",
-        onnx_cache_path: str = "models/vision_encoder.onnx",
+        onnx_cache_path: str = "models/vitb_image_encoder.onnx",
     ) -> None:
         """
         Load the OpenCLIP model, preprocessing transforms, and tokenizer.
@@ -62,37 +75,27 @@ class EmbedManager():
             if hasattr(torch, "xpu") and torch.xpu.is_available()
             else "cpu"
         )
-        print(f"[EmbedManager] Loading OpenCLIP on device: {self.device}")
-
         # --- Model, image-preprocessing pipeline, and tokenizer ---
-        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
-            model_name,
-            pretrained=pretrained,
-            device=self.device,
-        )
-        self.tokenizer = open_clip.get_tokenizer(model_name)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+                model_name,
+                pretrained=pretrained,
+                device=self.device,
+            )
+            self.tokenizer = open_clip.get_tokenizer(model_name)
 
         # --- OpenVINO vision encoder (FP16 GPU for batch image indexing) ---
         self._ov_encoder = None
         try:
             from vision_encoder_openvino import create_openvino_encoder
             self._ov_encoder = create_openvino_encoder(self, onnx_cache_path)
-        except Exception as exc:
-            print(f"[EmbedManager] OpenVINO init failed: {exc}")
-            print("[EmbedManager] Falling back to PyTorch CPU for images")
+        except Exception:
+            pass
 
         if self._ov_encoder:
-            from vision_encoder_openvino import print_gpu_status
-            print(
-                "[EmbedManager] Vision backend: OpenVINO (GPU, FP16) for images | "
-                "PyTorch (CPU, FP32) for text"
-            )
-            print_gpu_status(self._ov_encoder)
+            print("[EmbedManager] Vision encoder: GPU (OpenVINO, FP16)")
         else:
-            print(
-                "[EmbedManager] Vision backend: PyTorch (CPU, FP32) for both "
-                "images and text"
-            )
+            print(f"[EmbedManager] Vision encoder: {self.device} (PyTorch, FP32)")
 
     # ------------------------------------------------------------------
     # Public API
@@ -100,11 +103,11 @@ class EmbedManager():
 
     def embed_text(self, text: str | list[str]) -> list[list[float]]:
         """
-        Encode one or more text strings through the CLIP text encoder.
+        Encode one or more text strings through the text encoder.
 
         Args:
             text:  A single query string or a batch of strings.
-                   NOTE — OpenCLIP truncates inputs to 77 tokens.
+                   NOTE — the tokenizer may truncate long inputs.
 
         Returns:
             A list of L2-normalised embedding vectors (one per input string),
@@ -120,23 +123,14 @@ class EmbedManager():
 
         with torch.inference_mode():
             text_features = self.model.encode_text(text_tokens)
-            # L2 normalisation is mandatory for CLIP — without it cosine
-            # similarity comparisons in ChromaDB are unreliable.
+            # L2 normalisation — required for cosine-similarity searches
             text_features /= text_features.norm(dim=-1, keepdim=True)
-
-        elapsed = time.perf_counter() - t0
-        n = len(text)
-        print(
-            f"[EmbedManager] embed_text: {n} chunk(s) in {elapsed:.2f}s "
-            f"→ {n / elapsed:.1f} chunks/s  "
-            f"(dim={text_features.shape[1]}, device={self.device})"
-        )
 
         return text_features.tolist()
 
     def embed_image(self, image_paths: str | list[str]) -> list[list[float]]:
         """
-        Encode one or more image files through the CLIP vision encoder.
+        Encode one or more image files through the vision encoder.
 
         Routes through OpenVINO GPU (FP16) when available; falls back to
         PyTorch CPU (FP32) otherwise.
@@ -160,7 +154,7 @@ class EmbedManager():
         def _load_and_preprocess(path: str):
             return self.preprocess(Image.open(path).convert("RGB"))
 
-        n_workers = min(len(image_paths), 16)
+        n_workers = min(len(image_paths), 24)
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
             images = list(pool.map(_load_and_preprocess, image_paths))
 
@@ -170,13 +164,6 @@ class EmbedManager():
         if self._ov_encoder is not None:
             # image_input stays on CPU — OpenVINO reads numpy directly
             embeddings = self._ov_encoder.encode(image_input)
-            elapsed = time.perf_counter() - t0
-            n = len(image_paths)
-            print(
-                f"[EmbedManager] embed_image: {n} image(s) in {elapsed:.2f}s "
-                f"→ {n / elapsed:.1f} images/s  "
-                f"(dim={embeddings.shape[1]}, backend=OpenVINO, precision=FP16)"
-            )
             return embeddings.tolist()
 
         # --- PyTorch fallback (CPU, FP32) ---
@@ -184,14 +171,6 @@ class EmbedManager():
         with torch.inference_mode():
             image_features = self.model.encode_image(image_input)
             image_features /= image_features.norm(dim=-1, keepdim=True)
-
-        elapsed = time.perf_counter() - t0
-        n = len(image_paths)
-        print(
-            f"[EmbedManager] embed_image: {n} image(s) in {elapsed:.2f}s "
-            f"→ {n / elapsed:.1f} images/s  "
-            f"(dim={image_features.shape[1]}, backend=PyTorch, device={self.device})"
-        )
 
         return image_features.tolist()
 

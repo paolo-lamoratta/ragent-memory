@@ -1,6 +1,6 @@
 # ragent-memory
 
-Multimodal RAG (Retrieval-Augmented Generation) memory layer — ingest text documents and images into a persistent vector database, then search across both modalities with natural language queries powered by CLIP embeddings.
+Multimodal RAG (Retrieval-Augmented Generation) memory layer — ingest text documents and images into a persistent vector database, then search across both modalities with natural language queries powered by multimodal embeddings.
 
 ## Architecture
 
@@ -105,7 +105,7 @@ rag.embedder.gpu_status()
 ```
 ragent-memory/
 ├── main.py                      # DynamicAgentRAG — top-level RAG orchestrator
-├── embedder.py                  # EmbedManager — dual-backend CLIP embeddings
+├── embedder.py                  # EmbedManager — dual-backend multimodal embeddings
 ├── vision_encoder_openvino.py   # OpenVINO GPU (FP16) encoder + ONNX export
 ├── chunker.py                   # Chunker — text → overlapping chunks + metadata
 ├── dbmanager.py                 # DB — ChromaDB persistent client wrapper
@@ -121,7 +121,7 @@ ragent-memory/
 
 | Package | Purpose |
 |---|---|
-| `open_clip_torch` | ViT-SO400M-14-SigLIP-384 model |
+| `open_clip_torch` | OpenCLIP model (configurable) |
 | `chromadb` | Persistent vector database |
 | `torch` / `torchvision` | PyTorch runtime + image transforms |
 | `Pillow` | Image decoding |

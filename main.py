@@ -9,7 +9,7 @@ class DynamicAgentRAG():
             self,
             storage_directory: str = "./vector_db/",
             memory_label: str = "myrag",
-            model_name: str = "ViT-SO400M-14-SigLIP-384",
+            model_name: str = "ViT-B-16-SigLIP",
             pretrained: str = "webli",
     ) -> None:
         self.memory_metadata: dict[str, dict[str, Any]] = {}
@@ -37,18 +37,13 @@ class DynamicAgentRAG():
             "type": "text",
         }
 
-        print(
-            f"[DynamicAgentRAG] add_to_memory: {len(documents)} chunks "
-            f"ingested (source_id={source_id})"
-        )
-
         return source_id
 
     def add_image_to_memory(self, image_path: str) -> str:
         """
         Ingest a single image file into the vector database.
 
-        Images are embedded via the CLIP vision encoder and stored alongside
+        Images are embedded via the vision encoder and stored alongside
         a ``type: "image"`` metadata tag so the retrieval loop can bypass
         paragraph-expansion logic that only applies to text chunks.
 
@@ -87,25 +82,20 @@ class DynamicAgentRAG():
             "type": "image",
         }
 
-        print(
-            f"[DynamicAgentRAG] add_image_to_memory: 1 image ingested "
-            f"(source_id={source_id}, path={image_path})"
-        )
-
         return source_id
 
     def add_batch_images_to_memory(
-        self, image_paths: list[str], batch_size: int = 32,
+        self, image_paths: list[str], batch_size: int = 48,
     ) -> list[str]:
         """
         Ingest multiple images, processing them in sub-batches to keep
         peak GPU/CPU memory bounded while still exploiting vectorised
-        forward passes through the Vision Transformer.
+        forward passes through the vision encoder.
 
         Args:
             image_paths:  List of paths to image files on disk.
-            batch_size:   Max images to encode in a single forward pass
-                          (default 32).  Lower this if you run out of RAM.
+            batch_size:   Max images to encode in a single forward pass.
+                          Lower this if you run out of RAM.
 
         Returns:
             List of generated ``source_id`` strings (one per image).
@@ -128,12 +118,12 @@ class DynamicAgentRAG():
             end = min(start + batch_size, n_total)
             batch_num = start // batch_size + 1
             sub_batch = image_paths[start:end]
-            print(
-                f"[DynamicAgentRAG] Sub-batch {batch_num}/{n_batches} "
-                f"({len(sub_batch)} images, index {start}–{end - 1})"
-            )
+            # Simple inline progress percentage
+            pct = int(batch_num / n_batches * 100)
+            print(f"\r  Embedding images … {pct}%", end="", flush=True)
             sub_embeddings = self.embedder.embed_image(sub_batch)
             all_embeddings.extend(sub_embeddings)
+        print()  # newline after progress
 
         # --- Build upsert payloads ---
         for path in image_paths:
@@ -161,12 +151,6 @@ class DynamicAgentRAG():
             embeddings=all_embeddings,
             documents=image_paths,
             metadatas=metadatas,  # type: ignore[arg-type]
-        )
-
-        print(
-            f"[DynamicAgentRAG] add_batch_images_to_memory: "
-            f"{n_total} images ingested "
-            f"(batch_size={batch_size}, source_ids={source_ids})"
         )
 
         return source_ids
