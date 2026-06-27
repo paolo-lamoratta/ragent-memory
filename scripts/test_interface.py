@@ -1,6 +1,6 @@
 """Interactive test shell for the multimodal RAG pipeline."""
 
-from main import DynamicAgentRAG
+from ragent_memory import DynamicAgentRAG
 
 rag = DynamicAgentRAG()
 

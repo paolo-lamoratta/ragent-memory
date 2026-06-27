@@ -16,6 +16,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import os
 import warnings
 from typing import TYPE_CHECKING
 
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
 
 SIGLIP_MODEL_ID: str = "google/siglip-base-patch16-224"
 SMOLM_MODEL_ID: str = "HuggingFaceTB/SmolLM2-135M"
-PROJECTOR_WEIGHTS_PATH: str = "models/projector_weights.pth"
+PROJECTOR_WEIGHTS_PATH: str = os.path.join(os.path.dirname(__file__), "..", "models", "projector_weights.pth")
 DEFAULT_MAX_NEW_TOKENS: int = 20
 
 

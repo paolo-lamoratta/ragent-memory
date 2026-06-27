@@ -50,7 +50,7 @@ pip install transformers datasets tqdm
 # 3. Drop images and text files in resources/
 
 # 4. Run the interactive shell
-python test_interface.py
+python scripts/test_interface.py
 
 # 5. Type a query
 > a person standing outdoors at sunset
@@ -74,7 +74,7 @@ The vision encoder is exported to ONNX and compiled for OpenVINO on first use (o
 ## Usage
 
 ```python
-from main import DynamicAgentRAG
+from ragent_memory import DynamicAgentRAG
 
 rag = DynamicAgentRAG()
 
@@ -118,20 +118,24 @@ The captioner uses a frozen SigLIP vision encoder + a trained projector + a froz
 
 ```
 ragent-memory/
-├── main.py                          # DynamicAgentRAG — top-level RAG orchestrator
-├── embedder.py                      # EmbedManager — dual-backend multimodal embeddings
-├── captioner.py                     # ImageCaptioner — SigLIP→SmolLM2 caption inference
-├── vision_encoder_openvino.py       # OpenVINO GPU (FP16) encoder + ONNX export
-├── chunker.py                       # Chunker — text → overlapping chunks + metadata
-├── dbmanager.py                     # DB — ChromaDB persistent client wrapper
-├── loader.py                        # DocumentLoader — PDF / DOCX text extraction
-├── test_interface.py                # Interactive CLI for testing
-├── requirements.txt                 # Python dependencies
-├── pyproject.toml                   # Package metadata
-├── .gitignore
-├── models/                          # ONNX model + projector weights (gitignored)
+├── ragent_memory/                   # Python package
+│   ├── __init__.py
+│   ├── core.py                      # DynamicAgentRAG — top-level RAG orchestrator
+│   ├── embedder.py                  # EmbedManager — dual-backend multimodal embeddings
+│   ├── captioner.py                 # ImageCaptioner — SigLIP→SmolLM2 caption inference
+│   ├── vision_encoder_openvino.py   # OpenVINO GPU (FP16) encoder + ONNX export
+│   ├── chunker.py                   # Chunker — text → overlapping chunks + metadata
+│   ├── dbmanager.py                 # DB — ChromaDB persistent client wrapper
+│   └── loader.py                    # DocumentLoader — PDF / DOCX text extraction
+├── scripts/                         # Runnable entry points
+│   ├── test_interface.py            # Interactive CLI for testing
+│   └── precompute_captioner_cache.py # Step 1 of captioner training
+├── models/                          # Projector weights (tracked) + ONNX cache (gitignored)
 ├── resources/                       # Your images and text files (gitignored)
-└── vector_db/                       # ChromaDB persistent storage (gitignored)
+├── vector_db/                       # ChromaDB persistent storage (gitignored)
+├── requirements.txt
+├── pyproject.toml
+└── .gitignore
 ```
 
 ### Training scripts
@@ -139,8 +143,8 @@ ragent-memory/
 The captioning projector was trained on COCO 2017. The two-step training pipeline is preserved for reproducibility:
 
 ```
-precompute_captioner_cache.py   ← Step 1: Run SigLIP on COCO → siglip_cache.pt
-train_captioner.ipynb           ← Step 2: Train projector → models/projector_weights.pth
+scripts/precompute_captioner_cache.py   ← Step 1: Run SigLIP on COCO → siglip_cache.pt
+train_captioner.ipynb                   ← Step 2: Train projector → models/projector_weights.pth
 ```
 
 These are not needed for inference — just the weights file.

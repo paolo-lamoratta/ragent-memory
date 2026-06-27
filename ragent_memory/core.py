@@ -1,9 +1,9 @@
 from datetime import datetime
 from typing import Any
-from chunker import Chunker
-from embedder import EmbedManager
-from dbmanager import DB
-from captioner import ImageCaptioner
+from ragent_memory.chunker import Chunker
+from ragent_memory.embedder import EmbedManager
+from ragent_memory.dbmanager import DB
+from ragent_memory.captioner import ImageCaptioner
 
 class DynamicAgentRAG():
     def __init__(

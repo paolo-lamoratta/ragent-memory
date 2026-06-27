@@ -46,7 +46,7 @@ class EmbedManager:
         self,
         model_name: str = "ViT-B-16-SigLIP",
         pretrained: str = "webli",
-        onnx_cache_path: str = "models/vitb_image_encoder.onnx",
+        onnx_cache_path: str = os.path.join(os.path.dirname(__file__), "..", "models", "vitb_image_encoder.onnx"),
     ) -> None:
         """
         Load the OpenCLIP model, preprocessing transforms, and tokenizer.
@@ -72,7 +72,7 @@ class EmbedManager:
         # --- OpenVINO vision encoder (FP16 GPU for batch image indexing) ---
         self._ov_encoder = None
         try:
-            from vision_encoder_openvino import create_openvino_encoder
+            from ragent_memory.vision_encoder_openvino import create_openvino_encoder
             self._ov_encoder = create_openvino_encoder(self, onnx_cache_path)
         except Exception:
             pass
@@ -160,7 +160,7 @@ class EmbedManager:
         return image_features.tolist()
 
 # ------------------------------------------------------------------
-# Quick smoke test (run with:  python embedder.py)
+# Quick smoke test (run with:  python -m ragent_memory.embedder)
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     client = EmbedManager()
