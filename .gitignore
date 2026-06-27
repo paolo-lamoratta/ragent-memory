@@ -1,9 +1,12 @@
 .pyenv/
 vector_db/
-models/
 __pycache__/
 *.pyc
 .DS_Store
 resources/
 *.pt
 .ipynb_checkpoints/
+
+# Auto-generated ONNX cache (regenerated on first run — keep out of git)
+models/*.onnx
+models/*.onnx.data

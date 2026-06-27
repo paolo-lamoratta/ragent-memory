@@ -152,7 +152,10 @@ class ImageCaptioner:
 
         try:
             state = torch.load(projector_weights_path, map_location=self._device)
-            self._projector.load_state_dict(state)
+            # Saved weights are from a bare nn.Sequential (keys: "0.weight", …).
+            # Our wrapper stores it as self.net, so prepend the "net." prefix.
+            prefixed = {"net." + k: v for k, v in state.items()}
+            self._projector.load_state_dict(prefixed)
             self._projector.eval()
         except FileNotFoundError:
             print(
@@ -238,8 +241,15 @@ class ImageCaptioner:
         vision_outputs = self._siglip.get_image_features(
             pixel_values=pixel_values
         )
-        # Normalise to unit length (matches training)
-        vision_embeds = vision_outputs / vision_outputs.norm(
+        # Extract embedding tensor (handles varying transformers output formats)
+        if hasattr(vision_outputs, "image_embeds"):
+            vision_embeds = vision_outputs.image_embeds
+        elif hasattr(vision_outputs, "pooler_output"):
+            vision_embeds = vision_outputs.pooler_output
+        else:
+            vision_embeds = vision_outputs
+        # L2-normalise to unit length (matches training)
+        vision_embeds = vision_embeds / vision_embeds.norm(
             p=2, dim=-1, keepdim=True
         )
 
