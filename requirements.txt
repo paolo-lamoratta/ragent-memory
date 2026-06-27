@@ -1,12 +1,29 @@
-# Core
+# =============================================================================
+# Core — always required
+# =============================================================================
 chromadb>=1.5
 open_clip_torch>=3.3
 torch>=2.8
 torchvision>=0.27
 Pillow>=12.0
-huggingface_hub>=1.20
+huggingface-hub>=1.20
 
-# OpenVINO GPU acceleration (optional — falls back to PyTorch CPU if missing)
+# =============================================================================
+# Document parsing (used by loader.py)
+# =============================================================================
+PyMuPDF
+python-docx
+
+# =============================================================================
+# Image captioning (used by captioner.py)
+# =============================================================================
+transformers>=4.45
+datasets
+tqdm
+
+# =============================================================================
+# OpenVINO GPU acceleration (optional — falls back to PyTorch CPU)
+# =============================================================================
 openvino>=2025.0
 onnx>=1.17
 onnxscript>=0.7

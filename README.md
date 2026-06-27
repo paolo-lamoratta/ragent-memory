@@ -2,27 +2,29 @@
 
 Multimodal RAG (Retrieval-Augmented Generation) memory layer — ingest text documents and images into a persistent vector database, then search across both modalities with natural language queries powered by multimodal embeddings.
 
+Images are auto-captioned via a SigLIP→SmolLM2 pipeline, so text queries like *"a dog running in a park"* find photos even when the visual embedding alone wouldn't surface them.
+
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────┐
-│                   DynamicAgentRAG                 │
-│  add_to_memory(text)    add_batch_images(paths)   │
-│  query_memory(q)        forget_memory(id)         │
-└──────────┬──────────────────┬────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                   DynamicAgentRAG                     │
+│  add_to_memory(text)    add_batch_images(paths)       │
+│  query_memory(q)        forget_memory(id)             │
+└──────────┬──────────────────┬────────────────────────┘
            │                  │
-    ┌──────▼──────┐   ┌───────▼──────────────┐
-    │   Chunker   │   │    EmbedManager       │
-    │ chunk+meta  │   │  ┌──────────────────┐ │
-    └──────┬──────┘   │  │ embed_text()     │ │
-           │          │  │  PyTorch CPU FP32 │ │ ← live queries
-           │          │  ├──────────────────┤ │
-           │          │  │ embed_image()    │ │
-           │          │  │  OpenVINO GPU     │ │ ← batch indexing
-           │          │  │  FP16 (PyTorch    │ │
-           │          │  │  CPU fallback)    │ │
-           │          │  └──────────────────┘ │
-           │          └──────────┬───────────┘
+    ┌──────▼──────┐   ┌───────▼──────────────────────┐
+    │   Chunker   │   │       EmbedManager            │
+    │ chunk+meta  │   │  ┌───────────────────────────┐│
+    └──────┬──────┘   │  │ embed_text()  — PyTorch   ││ ← live queries
+           │          │  │ embed_image() — OpenVINO   ││ ← batch indexing
+           │          │  │                GPU FP16    ││
+           │          │  └───────────────────────────┘│
+           │          │  ┌───────────────────────────┐│
+           │          │  │ ImageCaptioner             ││
+           │          │  │ SigLIP→SmolLM2→caption     ││ ← auto-captions
+           │          │  └───────────────────────────┘│
+           │          └──────────┬───────────────────┘
            │                     │
     ┌──────▼─────────────────────▼──────┐
     │            ChromaDB                │
@@ -34,36 +36,40 @@ Multimodal RAG (Retrieval-Augmented Generation) memory layer — ingest text doc
 |---|---|---|---|
 | Image indexing (batch) | OpenVINO GPU | FP16 | Throughput — up to 35 img/s |
 | Text queries (live) | PyTorch CPU | FP32 | Low overhead per query |
+| Image captioning | SigLIP + SmolLM2 | FP32 | Auto-generated descriptions |
 
 ## Quick Start
 
 ```bash
-# 1. Install
+# 1. Install core dependencies
 pip install -r requirements.txt
 
-# 2. Drop images in resources/ and text files in resources/
+# 2. (Optional) Install captioning support
+pip install transformers datasets tqdm
 
-# 3. Run the interactive shell
+# 3. Drop images and text files in resources/
+
+# 4. Run the interactive shell
 python test_interface.py
 
-# 4. Type a query
-Write a search query: > a person standing outdoors at sunset
+# 5. Type a query
+> a person standing outdoors at sunset
 ```
 
 ## Installation
 
 ```bash
-# Core dependencies
+# Core
 pip install chromadb open_clip_torch torch Pillow
 
 # OpenVINO GPU acceleration (optional — auto-falls back to CPU)
 pip install openvino onnx onnxscript
 
-# Intel Arc GPU acceleration (optional)
-pip install intel-extension-for-pytorch
+# Image captioning (optional — falls back gracefully)
+pip install transformers datasets tqdm
 ```
 
-On first run the vision encoder is exported to ONNX and compiled for OpenVINO (one-time, cached at `models/vision_encoder.onnx`). Subsequent runs load it instantly.
+The vision encoder is exported to ONNX and compiled for OpenVINO on first use (one-time, cached at `models/vitb_image_encoder.onnx`).
 
 ## Usage
 
@@ -73,10 +79,10 @@ from main import DynamicAgentRAG
 rag = DynamicAgentRAG()
 
 # --- Text documents ---
-with open("resources/Engine.txt") as f:
+with open("resources/report.txt") as f:
     rag.add_to_memory(f.read())
 
-# --- Images (batch — single forward pass per 32 images) ---
+# --- Images (auto-captioned) ---
 rag.add_batch_images_to_memory([
     "resources/photo1.jpg",
     "resources/photo2.jpg",
@@ -86,36 +92,58 @@ rag.add_batch_images_to_memory([
 # --- Search across all modalities ---
 result = rag.query_memory("exhaust manifold diagram")
 print(rag.format_context(result["context"]))
-# --- Result 1 (similarity: 0.760, source: abc123) ---
+# --- Result 1 (similarity: 0.823, source: abc123) ---
 # The internal combustion engine is an engine in which...
 #
-# --- Result 2 (similarity: 0.642, source: def456) ---
-# [IMAGE FILE] resources/engine_schematic.png
+# --- Result 2 (similarity: 0.761, source: def456) ---
+# [IMAGE] "a diagram of an exhaust manifold" → resources/engine_diagram.png
 
 # --- Manage memory ---
 rag.forget_memory("source_id")
 print(rag.get_memory_stats())  # {"total_memories": 3, "total_chunks": 42}
-
-# --- Check GPU status ---
-rag.embedder.gpu_status()
 ```
+
+### Captioning details
+
+Set `enable_captioning=False` to skip caption generation:
+
+```python
+rag = DynamicAgentRAG(enable_captioning=False)
+rag.add_image_to_memory("photo.jpg")  # no caption generated
+```
+
+The captioner uses a frozen SigLIP vision encoder + a trained projector + a frozen SmolLM2-135M decoder. Weights live in `models/projector_weights.pth`. When `transformers` is not installed or weights are missing, captioning is silently skipped.
 
 ## Project Structure
 
 ```
 ragent-memory/
-├── main.py                      # DynamicAgentRAG — top-level RAG orchestrator
-├── embedder.py                  # EmbedManager — dual-backend multimodal embeddings
-├── vision_encoder_openvino.py   # OpenVINO GPU (FP16) encoder + ONNX export
-├── chunker.py                   # Chunker — text → overlapping chunks + metadata
-├── dbmanager.py                 # DB — ChromaDB persistent client wrapper
-├── test_interface.py            # Interactive CLI for testing
-├── requirements.txt             # Direct Python dependencies
+├── main.py                          # DynamicAgentRAG — top-level RAG orchestrator
+├── embedder.py                      # EmbedManager — dual-backend multimodal embeddings
+├── captioner.py                     # ImageCaptioner — SigLIP→SmolLM2 caption inference
+├── vision_encoder_openvino.py       # OpenVINO GPU (FP16) encoder + ONNX export
+├── chunker.py                       # Chunker — text → overlapping chunks + metadata
+├── dbmanager.py                     # DB — ChromaDB persistent client wrapper
+├── loader.py                        # DocumentLoader — PDF / DOCX text extraction
+├── test_interface.py                # Interactive CLI for testing
+├── requirements.txt                 # Python dependencies
+├── pyproject.toml                   # Package metadata
 ├── .gitignore
-├── models/                      # Cached ONNX model (gitignored)
-├── resources/                   # Your images and text files (gitignored)
-└── vector_db/                   # ChromaDB persistent storage (gitignored)
+├── models/                          # ONNX model + projector weights (gitignored)
+├── resources/                       # Your images and text files (gitignored)
+└── vector_db/                       # ChromaDB persistent storage (gitignored)
 ```
+
+### Training scripts
+
+The captioning projector was trained on COCO 2017. The two-step training pipeline is preserved for reproducibility:
+
+```
+precompute_captioner_cache.py   ← Step 1: Run SigLIP on COCO → siglip_cache.pt
+train_captioner.ipynb           ← Step 2: Train projector → models/projector_weights.pth
+```
+
+These are not needed for inference — just the weights file.
 
 ## Dependencies
 
@@ -125,8 +153,10 @@ ragent-memory/
 | `chromadb` | Persistent vector database |
 | `torch` / `torchvision` | PyTorch runtime + image transforms |
 | `Pillow` | Image decoding |
-| `openvino` | GPU-accelerated inference (optional) |
-| `onnx` / `onnxscript` | Model export to OpenVINO (optional) |
-| `intel-extension-for-pytorch` | Intel Arc iGPU for PyTorch (optional) |
+| `PyMuPDF` / `python-docx` | Document parsing (PDF, DOCX) |
+| `transformers` | SigLIP + SmolLM2 for captioning (optional) |
+| `datasets` / `tqdm` | Training dataset and progress bars (optional) |
+| `openvino` / `onnx` / `onnxscript` | GPU-accelerated inference (optional) |
 
 When OpenVINO is unavailable, `embed_image` falls back to PyTorch CPU automatically.
+When `transformers` or projector weights are unavailable, captioning is silently skipped.

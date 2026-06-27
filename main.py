@@ -3,6 +3,7 @@ from typing import Any
 from chunker import Chunker
 from embedder import EmbedManager
 from dbmanager import DB
+from captioner import ImageCaptioner
 
 class DynamicAgentRAG():
     def __init__(
@@ -11,12 +12,15 @@ class DynamicAgentRAG():
             memory_label: str = "myrag",
             model_name: str = "ViT-B-16-SigLIP",
             pretrained: str = "webli",
+            enable_captioning: bool = True,
     ) -> None:
         self.memory_metadata: dict[str, dict[str, Any]] = {}
 
         self.db = DB(storage_directory=storage_directory, db_name=memory_label)
         self.embedder = EmbedManager(model_name=model_name, pretrained=pretrained)
         self.chunker = Chunker(chunk_size=950, chunk_overlap=280)
+
+        self.captioner = ImageCaptioner() if enable_captioning else None
 
     def add_to_memory(self, text: str) -> str:
         documents, ids, metadatas = self.chunker.chunk_text(text)
@@ -47,6 +51,10 @@ class DynamicAgentRAG():
         a ``type: "image"`` metadata tag so the retrieval loop can bypass
         paragraph-expansion logic that only applies to text chunks.
 
+        When captioning is enabled, an auto-generated caption is also
+        embedded as a text chunk (``type: "image_caption"``) linked to the
+        same source, so text queries can find images by their descriptions.
+
         Args:
             image_path:  Absolute or relative path to an image file on disk.
 
@@ -58,11 +66,19 @@ class DynamicAgentRAG():
         # 1. Generate the image embedding
         embedding = self.embedder.embed_image(image_path)[0]
 
-        # 2. Create a unique source ID keyed on the file path
+        # 2. Generate caption (if available)
+        caption = ""
+        if self.captioner is not None:
+            try:
+                caption = self.captioner.caption(image_path)
+            except Exception:
+                caption = ""
+
+        # 3. Create a unique source ID keyed on the file path
         source_id = hashlib.md5(image_path.encode()).hexdigest()[:8]
         image_id = f"img_{source_id}"
 
-        # 3. Upsert into ChromaDB — store the path as the document
+        # 4. Upsert into ChromaDB — store the path and caption as metadata
         self.db.collection.upsert(
             ids=[image_id],
             embeddings=[embedding],
@@ -70,17 +86,24 @@ class DynamicAgentRAG():
             metadatas=[{
                 "type": "image",
                 "source_id": source_id,
+                "caption": caption,
                 "timestamp": datetime.now().isoformat(),
             }],
         )
 
-        # 4. Track in the local metadata registry
+        # 5. Track in the local metadata registry (before caption indexing
+        #    so _index_image_caption can append the caption chunk ID).
         self.memory_metadata[source_id] = {
             "chunk_count": 1,
             "chunks": [image_id],
             "timestamp": datetime.now().isoformat(),
             "type": "image",
+            "caption": caption,
         }
+
+        # 6. Also index the caption as a searchable text chunk
+        if caption:
+            self._index_image_caption(caption, image_path, source_id)
 
         return source_id
 
@@ -91,6 +114,10 @@ class DynamicAgentRAG():
         Ingest multiple images, processing them in sub-batches to keep
         peak GPU/CPU memory bounded while still exploiting vectorised
         forward passes through the vision encoder.
+
+        When captioning is enabled, each image also gets an auto-generated
+        caption embedded as a text chunk (``type: "image_caption"``) so
+        text queries can discover images by their descriptions.
 
         Args:
             image_paths:  List of paths to image files on disk.
@@ -110,6 +137,20 @@ class DynamicAgentRAG():
         metadatas: list[dict[str, str]] = []
         source_ids: list[str] = []
         all_embeddings: list[list[float]] = []
+        captions_map: dict[str, str] = {}
+
+        # --- Generate captions (if available) ---
+        if self.captioner is not None:
+            print("  Generating captions …", end="", flush=True)
+            try:
+                batch_captions = self.captioner.caption_batch(image_paths)
+                captions_map = {
+                    path: cap for path, cap in zip(image_paths, batch_captions)
+                    if cap
+                }
+                print(f" {len(captions_map)}/{len(image_paths)} captioned")
+            except Exception:
+                print(" failed — skipping captioning")
 
         # --- Process in sub-batches to keep tensors small ---
         n_total = len(image_paths)
@@ -118,7 +159,6 @@ class DynamicAgentRAG():
             end = min(start + batch_size, n_total)
             batch_num = start // batch_size + 1
             sub_batch = image_paths[start:end]
-            # Simple inline progress percentage
             pct = int(batch_num / n_batches * 100)
             print(f"\r  Embedding images … {pct}%", end="", flush=True)
             sub_embeddings = self.embedder.embed_image(sub_batch)
@@ -129,12 +169,14 @@ class DynamicAgentRAG():
         for path in image_paths:
             source_id = hashlib.md5(path.encode()).hexdigest()[:8]
             image_id = f"img_{source_id}"
+            caption = captions_map.get(path, "")
             source_ids.append(source_id)
 
             ids.append(image_id)
             metadatas.append({
                 "type": "image",
                 "source_id": source_id,
+                "caption": caption,
                 "timestamp": timestamp,
             })
 
@@ -143,6 +185,7 @@ class DynamicAgentRAG():
                 "chunks": [image_id],
                 "timestamp": timestamp,
                 "type": "image",
+                "caption": caption,
             }
 
         # --- Single ChromaDB upsert with all embeddings ---
@@ -152,6 +195,11 @@ class DynamicAgentRAG():
             documents=image_paths,
             metadatas=metadatas,  # type: ignore[arg-type]
         )
+
+        # --- Index captions as searchable text chunks ---
+        for path, caption in captions_map.items():
+            source_id = hashlib.md5(path.encode()).hexdigest()[:8]
+            self._index_image_caption(caption, path, source_id)
 
         return source_ids
 
@@ -184,13 +232,28 @@ class DynamicAgentRAG():
             document = results["documents"][0][i]
             metadata = results["metadatas"][0][i]
 
-            # --- Image bypass: images have no paragraphs, short-circuit ---
+            # --- Image bypass: no paragraph expansion ---
             if metadata.get("type") == "image":
+                caption = metadata.get("caption", "")
+                display = f"[IMAGE] {caption} → {document}" if caption else f"[IMAGE] {document}"
                 context.append({
-                    "text": f"[IMAGE FILE] {document}",
+                    "text": display,
                     "metadata": metadata,
                     "similarity": similarity,
                     "source_id": metadata.get("source_id"),
+                    "chunk_start": 0,
+                    "chunk_end": 0,
+                })
+                continue
+
+            # --- Image caption bypass: short-circuit as single chunk ---
+            if metadata.get("type") == "image_caption":
+                source_id_cap: str = metadata.get("source_id", "")  # type: ignore[assignment]
+                context.append({
+                    "text": f"[IMAGE] \"{document}\" → {metadata.get('image_path', source_id_cap)}",
+                    "metadata": metadata,
+                    "similarity": similarity,
+                    "source_id": source_id_cap,
                     "chunk_start": 0,
                     "chunk_end": 0,
                 })
@@ -285,6 +348,33 @@ class DynamicAgentRAG():
 
         return self._get_paragraph_entries(neighbour_id)
 
+    def _index_image_caption(
+        self, caption: str, image_path: str, source_id: str,
+    ) -> None:
+        """Embed an auto-generated image caption and store it as a
+        searchable text chunk linked to the source image."""
+        if not caption.strip():
+            return
+
+        caption_embedding = self.embedder.embed_text(caption)[0]
+        caption_id = f"cap_{source_id}"
+
+        self.db.collection.upsert(
+            ids=[caption_id],
+            embeddings=[caption_embedding],
+            documents=[caption],
+            metadatas=[{
+                "type": "image_caption",
+                "source_id": source_id,
+                "image_path": image_path,
+                "timestamp": datetime.now().isoformat(),
+            }],
+        )
+
+        # Register so forget_memory cleans it up
+        if source_id in self.memory_metadata:
+            self.memory_metadata[source_id].setdefault("chunks", []).append(caption_id)
+
     def forget_memory(self, source_id: str) -> None:
         if source_id in self.memory_metadata:
             chunks = self.memory_metadata[source_id]["chunks"]
@@ -347,8 +437,28 @@ class ContextAwareRAG(DynamicAgentRAG):
             return f"{query} [Context: {' '.join(recent)}]"
         return query
 
-    def intelligent_retrieve(self, query, use_context=True):
+    def intelligent_retrieve(
+        self, query: str, use_context: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Two-tier retrieval with deduplication.
+
+        Runs a context-augmented search for precision alongside a broader
+        fuzzy search for recall, then merges, deduplicates (by source_id),
+        and sorts by descending similarity.
+        """
         search_query = self.get_augmented_query(query) if use_context else query
         exact = self.retrieve_context(search_query, top_k=3)
         broad = self.retrieve_context(query, top_k=2, threshold=0.3)
-        # ... deduplicate and sort by similarity
+
+        seen: set[str] = set()
+        merged: list[dict[str, Any]] = []
+
+        for item in exact + broad:
+            sid = item.get("source_id", "")
+            if sid and sid in seen:
+                continue
+            seen.add(sid)
+            merged.append(item)
+
+        merged.sort(key=lambda r: r.get("similarity", 0), reverse=True)
+        return merged

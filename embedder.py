@@ -111,33 +111,37 @@ class EmbedManager:
 
         return text_features.tolist()
 
-    def embed_image(self, image_paths: str | list[str]) -> list[list[float]]:
+    def embed_image(
+        self,
+        image_paths: str | list[str] | io.BytesIO | list[io.BytesIO] | Image.Image | list[Image.Image],
+    ) -> list[list[float]]:
         """
-        Encode one or more image files through the vision encoder.
+        Encode one or more images through the vision encoder.
 
         Routes through OpenVINO GPU (FP16) when available; falls back to
         PyTorch CPU (FP32) otherwise.
 
         Args:
-            image_paths:  Path(s) to image file(s) on disk.
+            image_paths:  File path(s), BytesIO buffer(s), or PIL Image
+                          object(s).  PIL Images are used as-is (no
+                          decode/re-encode round-trip).
 
         Returns:
             A list of L2-normalised embedding vectors (one per image),
             each represented as ``list[float]``.
         """
-        if isinstance(image_paths, str):
-            image_paths = [image_paths]
+        if isinstance(image_paths, (str, io.BytesIO, Image.Image)):
+            image_paths = [image_paths] # pyright: ignore[reportAssignmentType]
 
         # Decode and preprocess images in parallel via a thread pool.
-        # PIL/JPEG decoding is I/O-bound, so 16 workers keep the pipeline
-        # saturated — while one batch goes through the encoder, the next
-        # batch of raw images is already being decoded.
-        def _load_and_preprocess(path: str):
-            return self.preprocess(Image.open(path).convert("RGB"))  # type: ignore[operator]
+        def _load_and_preprocess(source: str | io.BytesIO | Image.Image):
+            if isinstance(source, Image.Image):
+                return self.preprocess(source.convert("RGB"))  # type: ignore[operator]
+            return self.preprocess(Image.open(source).convert("RGB"))  # type: ignore[operator]
 
-        n_workers = min(len(image_paths), 24)
+        n_workers = min(len(image_paths), 24) # pyright: ignore[reportArgumentType]
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
-            images = list(pool.map(_load_and_preprocess, image_paths))
+            images = list(pool.map(_load_and_preprocess, image_paths)) # pyright: ignore[reportArgumentType]
 
         image_input = torch.stack(images)   # type: ignore[arg-type]
 
